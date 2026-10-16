@@ -1,0 +1,48 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "LJ Hub",
+  "version": "0.1.0",
+  "identifier": "com.ljhub.desktop",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:5183",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "LJ Hub",
+        "label": "main",
+        "width": 1360,
+        "height": 860,
+        "minWidth": 900,
+        "minHeight": 560,
+        "resizable": true,
+        "fullscreen": false,
+        "titleBarStyle": "Visible"
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["app", "dmg"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "copyright": "LJ Hub contributors. MIT licensed.",
+    "category": "DeveloperTool",
+    "shortDescription": "Lightweight multi-agent coding workbench",
+    "longDescription": "LJ Hub is a lightweight local-first desktop workbench that drives multiple ACP-compatible coding agents (Codex, WorkBuddy, Qoder, TRAE, DeepSeek Harness, OpenCode) from one window, with project + Git awareness and an explicit task handoff protocol.",
+    "macOS": {
+      "minimumSystemVersion": "12.0"
+    }
+  }
+}

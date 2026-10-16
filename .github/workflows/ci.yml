@@ -1,0 +1,137 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ---------------------------------------------------------------- core tests
+  rust:
+    name: Rust core (unit + ACP protocol tests)
+    runs-on: macos-14
+    defaults:
+      run:
+        working-directory: src-tauri
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Format check
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      # The suite uses the bundled mock ACP agent, so no vendor agent, account
+      # or network access is required.
+      - name: Test
+        run: cargo test --all-targets
+
+      - name: Real-agent detection report
+        run: cargo test --test real_agents report_real_agent_availability -- --nocapture
+
+  # ------------------------------------------------------------- frontend build
+  frontend:
+    name: Frontend (build + typecheck)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build
+        run: npm run build
+
+  # ------------------------------------------------------------ macOS bundle
+  app:
+    name: macOS app bundle (Apple Silicon)
+    runs-on: macos-14
+    needs: [rust, frontend]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Unsigned on purpose: the project has no Apple Developer identity in CI,
+      # and it must never claim that a build is signed or notarized.
+      - name: Build app bundle
+        run: npm run tauri build -- --bundles app
+
+      - name: Report bundle
+        run: |
+          ls -la "src-tauri/target/release/bundle/macos/" || true
+          du -sh "src-tauri/target/release/bundle/macos/LJ Hub.app" || true
+
+      - name: Upload unsigned bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: LJ-Hub-macos-arm64-unsigned
+          path: src-tauri/target/release/bundle/macos/LJ Hub.app
+          if-no-files-found: error
+          retention-days: 14
+
+  # ------------------------------------------------------ secret hygiene check
+  hygiene:
+    name: Secret hygiene
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fail on committed credentials or data
+        run: |
+          set -euo pipefail
+          # Patterns that must never appear in a public repository.
+          if git grep -nEI '(gho_[A-Za-z0-9]{20,}|ghp_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9]{20,}|BEGIN (RSA|OPENSSH|EC) PRIVATE KEY|client_secret["'"'"']?\s*[:=]\s*["'"'"'][A-Za-z0-9_-]{16,})' -- . ':!THIRD_PARTY_NOTICES.md' ':!README.md' ':!docs/*'; then
+            echo "::error::发现疑似凭据，禁止提交"
+            exit 1
+          fi
+          echo "未发现疑似凭据"
+
+      - name: Ensure no local task data is tracked
+        run: |
+          set -euo pipefail
+          if git ls-files | grep -E '^(node_modules|dist|src-tauri/target)/' ; then
+            echo "::error::构建产物不应进入仓库"
+            exit 1
+          fi
+          echo "工作树干净"

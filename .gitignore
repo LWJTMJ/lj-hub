@@ -1,0 +1,28 @@
+# ---- Node / frontend ----
+node_modules/
+dist/
+*.log
+npm-debug.log*
+.vite/
+
+# ---- Rust / Tauri ----
+src-tauri/target/
+src-tauri/gen/schemas/
+
+# ---- macOS ----
+.DS_Store
+._*
+
+# ---- Local editor / tooling ----
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# ---- Secrets and local credentials (never committed) ----
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.mobileprovision
+src-tauri/icons/source.bmp

@@ -1,0 +1,52 @@
+[package]
+name = "lj-hub"
+version = "0.1.0"
+description = "LJ Hub - lightweight multi-agent coding workbench"
+authors = ["LJ Hub contributors"]
+edition = "2021"
+rust-version = "1.82"
+license = "MIT"
+default-run = "lj-hub"
+
+[lib]
+name = "lj_hub_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "lj-hub"
+path = "src/main.rs"
+
+# A protocol-level mock ACP agent, used by the automated test suite so that
+# session handling can be verified without any vendor account or network.
+[[bin]]
+name = "mock-acp-agent"
+path = "src/bin/mock_acp_agent.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "sync", "time", "io-util"] }
+agent-client-protocol = { version = "3.3.0", features = ["process"] }
+sha2 = "0.10"
+hex = "0.4"
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+which = "7"
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+async-trait = "0.1"
+
+[dev-dependencies]
+tempfile = "3"
+
+[features]
+# Enabled by `cargo test` helpers that need an isolated data directory.
+default = []
