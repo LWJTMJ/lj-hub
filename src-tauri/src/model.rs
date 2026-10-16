@@ -325,6 +325,12 @@ pub struct Settings {
     pub theme: String,
     pub locale: String,
     pub agent_overrides: std::collections::BTreeMap<String, AgentOverride>,
+    /// Last opened project/task, so restarting the app lands the user back in
+    /// the same conversation instead of an empty window.
+    #[serde(default)]
+    pub last_project_id: Option<String>,
+    #[serde(default)]
+    pub last_task_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

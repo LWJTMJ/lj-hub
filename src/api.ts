@@ -140,6 +140,8 @@ export const api = {
 
   // settings
   getSettings: () => invoke<Settings>("get_settings"),
+  setLastOpened: (projectId: string | null, taskId: string | null) =>
+    invoke<void>("set_last_opened", { projectId, taskId }),
   setTheme: (theme: string) => invoke<void>("set_theme", { theme }),
   setLocale: (locale: string) => invoke<void>("set_locale", { locale }),
 };

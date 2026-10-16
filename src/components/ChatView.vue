@@ -158,7 +158,8 @@ const statusClass = computed(() => {
 <template>
   <main class="chat">
     <div v-if="!task" class="empty">
-      <p>{{ labels.noProjects }}</p>
+      <p>{{ labels.appName }}</p>
+      <p class="hint">{{ labels.noTaskSelected }}</p>
     </div>
 
     <template v-else>

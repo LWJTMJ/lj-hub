@@ -14,6 +14,7 @@ const zh = {
   newTask: "新建任务",
   noProjects: "还没有项目。先打开一个本地 Git 仓库目录。",
   noTasks: "这个项目还没有任务。",
+  noTaskSelected: "从左侧选择一个任务，或新建一个任务；也可以先打开一个本地 Git 仓库目录。",
   settings: "设置",
   agent: "Agent",
   agents: "Agent 管理",
@@ -123,6 +124,8 @@ const en: typeof zh = {
   newTask: "New task",
   noProjects: "No projects yet. Open a local Git repository directory.",
   noTasks: "No tasks for this project yet.",
+  noTaskSelected:
+    "Pick a task on the left or create a new one; you can also open a local Git repository directory.",
   settings: "Settings",
   agent: "Agent",
   agents: "Agent management",

@@ -248,6 +248,7 @@ export interface AppInfo {
   arch: string;
   git_available: boolean;
   protocol: string;
+  screenshot_open?: string | null;
 }
 
 export interface SessionStatus {
@@ -313,6 +314,8 @@ export interface Settings {
   theme: string;
   locale: string;
   agent_overrides: Record<string, AgentOverride>;
+  last_project_id?: string | null;
+  last_task_id?: string | null;
 }
 
 export interface AgentOverride {

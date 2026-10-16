@@ -435,6 +435,24 @@ pub fn run() {
             state.set_app(app.handle().clone());
             state.refresh_index();
             app.manage(state);
+
+            // Documentation helper: `LJ_HUB_SCREENSHOT_MODE=topmost` raises the
+            // window above other applications **without activating it**, so a
+            // real screenshot can be taken while another app keeps focus.
+            // Without the variable this code does nothing.
+            if std::env::var("LJ_HUB_SCREENSHOT_MODE").is_ok() {
+                // Applied after the window has been shown: touching the window
+                // flags during setup() prevents it from appearing on macOS.
+                if let Some(window) = app.get_webview_window("main") {
+                    std::thread::spawn(move || {
+                        std::thread::sleep(std::time::Duration::from_millis(2000));
+                        let _ = window.show();
+                        let _ = window.set_size(tauri::LogicalSize::new(1360.0, 800.0));
+                        let _ = window.set_position(tauri::LogicalPosition::new(24.0, 48.0));
+                        let _ = window.set_always_on_top(true);
+                    });
+                }
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -475,6 +493,7 @@ pub fn run() {
             crate::commands::remove_artifact,
             crate::commands::read_requirement_file,
             crate::commands::get_settings,
+            crate::commands::set_last_opened,
             crate::commands::set_theme,
             crate::commands::set_locale,
             crate::commands::import_requirements,

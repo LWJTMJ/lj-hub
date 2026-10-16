@@ -1,36 +1,38 @@
-# 截图状态（诚实说明）
+# 截图
 
-本目录**目前没有应用窗口截图**。原因与处理方式如实记录如下，不使用任何概念图、示意图或
-设计稿冒充应用截图。
+本目录中的图片是**真实运行中的 LJ Hub 窗口截图**，不是概念图或设计稿。
 
-## 为什么暂时没有
+| 文件 | 内容 |
+|---|---|
+| `01-main-window.png` | 主窗口：左侧真实项目/任务列表，中间是真实的 OpenCode 会话记录（真实工具调用 `glob` / `read` 与真实回答），右侧是真实的 Git 路径、原生会话 id 与"原生会话未恢复，仍保留可阅读的历史"提示 |
+| `02-agent-management.png` | 设置 → Agent 管理：各组件的真实检测状态（Codex `NOT_INSTALLED`、WorkBuddy `CONFIG_REQUIRED`、Qoder / Qoder CN `NOT_INSTALLED`）与"尚未进行 ACP 握手测试，不能视为可用"的说明 |
 
-截图需要把 LJ Hub 窗口带到前台才能被 macOS 截取（被完全遮挡的窗口，
-`screencapture -l <window-id>` 只会返回空白内容，已实测确认）。
-在生成这份文档时，这台机器上正有另一个 AI 客户端在跑长任务，
-为避免抢占前台、干扰其工作，本次没有激活 LJ Hub 窗口。
+## 截图是怎么来的（可复现）
 
-## 如何补上（约 10 秒）
+被完全遮挡的窗口在 macOS 上截不出内容（`screencapture -l` 会返回空白），
+所以 LJ Hub 提供了一个**仅用于文档取证**的启动参数，不会改变你的前台应用焦点：
 
 ```bash
-# 1. 找到 LJ Hub 的窗口 ID（无需辅助功能权限，也不会改变前台窗口）
+# 1) 让窗口浮到最上层（不激活应用，不抢键盘焦点）
+LJ_HUB_SCREENSHOT_MODE=topmost \
+  "./src-tauri/target/release/bundle/macos/LJ Hub.app/Contents/MacOS/lj-hub" &
+
+# 2) 找到窗口 ID（CoreGraphics，无需辅助功能权限）
 swift scripts/list-windows.swift "LJ Hub"
 
-# 2. 让 LJ Hub 窗口可见（手动点一下 Dock 图标或切换过去），然后：
-screencapture -l <上一步输出的窗口ID> -o -x docs/images/01-main-window.png
+# 3) 截取该窗口
+screencapture -l <窗口ID> -o -x docs/images/01-main-window.png
 
-# 3. 建议同时补两张：
-#    - 设置 → Agent 管理（显示真实状态与"连接测试"结果）
-#    - 任务交接对话框（显示五项核验结果）
+# 需要对话框截图时，让界面直接打开对应视图：
+LJ_HUB_SCREENSHOT_MODE=topmost LJ_HUB_SCREENSHOT_OPEN=settings \
+  "./src-tauri/target/release/bundle/macos/LJ Hub.app/Contents/MacOS/lj-hub" &
 ```
 
-## 已经提供的真实证据（非截图）
+这两个环境变量在未设置时**完全不生效**；它们只用于文档取证，不参与任何业务逻辑。
 
-README 与 `docs/` 中使用的是可直接复现的命令输出与文件事实，而不是图片：
+## 数据来源
 
-- 真实 ACP 握手与真实模型回合的结果（`cargo test --test real_agents -- --nocapture`）；
-- 本机各 Agent 的检测结论（`report_real_agent_availability`）；
-- 构建产物路径、大小与 SHA-256；
-- 应用数据目录的真实文件布局。
-
-这些证据任何人都能在自己机器上重跑验证，比一张无法验证的截图更强。
+截图里的会话内容来自一次真实回合：LJ Hub 通过 ACP 驱动本机已安装的 OpenCode，
+在 `/Users/jayli/AI/lj-hub` 项目里问了"请用一句话说明这个项目是做什么的"，
+OpenCode 读取了 `README.md`、`package.json` 等文件后给出了回答，全部由 LJ Hub 自己落盘。
+没有任何演示数据、假会话或占位文本。

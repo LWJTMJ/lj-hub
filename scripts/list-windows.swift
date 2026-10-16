@@ -26,8 +26,11 @@ for window in windows {
     let width = (bounds["Width"] as? Double) ?? 0
     let height = (bounds["Height"] as? Double) ?? 0
 
-    // Only real, reasonably sized windows.
-    guard layer == 0, width > 400, height > 300 else { continue }
+    // Real, reasonably sized windows. Always-on-top windows live on a higher
+    // window level, so the layer filter is relaxed when filtering by name.
+    let matchesNeedle =
+        needle.map { owner.lowercased().contains($0) || title.lowercased().contains($0) } ?? false
+    guard width > 400, height > 300, (layer == 0 || matchesNeedle) else { continue }
     if let needle, !(owner.lowercased().contains(needle) || title.lowercased().contains(needle)) {
         continue
     }

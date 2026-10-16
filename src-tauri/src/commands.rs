@@ -33,6 +33,10 @@ pub struct AppInfo {
     pub arch: String,
     pub git_available: bool,
     pub protocol: String,
+    /// Documentation helper: when LJ_HUB_SCREENSHOT_OPEN is set, the UI opens
+    /// that view right after start so screenshots can be taken without
+    /// synthetic clicks. Purely local, no effect unless the variable is set.
+    pub screenshot_open: Option<String>,
 }
 
 #[tauri::command]
@@ -45,6 +49,7 @@ pub fn app_info(state: State<'_, AppState>) -> AppInfo {
         arch: std::env::consts::ARCH.to_string(),
         git_available: agents::which("git").is_some(),
         protocol: "ACP v1 (agent-client-protocol 3.x)".into(),
+        screenshot_open: std::env::var("LJ_HUB_SCREENSHOT_OPEN").ok(),
     }
 }
 
@@ -1150,6 +1155,21 @@ pub fn get_settings(state: State<'_, AppState>) -> Settings {
         .lock()
         .map(|s| s.settings.clone())
         .unwrap_or_default()
+}
+
+/// Remember where the user was, so the next launch reopens it.
+#[tauri::command]
+pub fn set_last_opened(
+    state: State<'_, AppState>,
+    project_id: Option<String>,
+    task_id: Option<String>,
+) -> Result<(), String> {
+    let mut store = state.state.lock().map_err(|e| e.to_string())?;
+    if let Some(project_id) = project_id {
+        store.settings.last_project_id = Some(project_id);
+    }
+    store.settings.last_task_id = task_id;
+    state.store.save_state(&store).map_err(|e| e.to_string())
 }
 
 #[tauri::command]

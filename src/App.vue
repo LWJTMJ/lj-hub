@@ -115,8 +115,9 @@ async function loadGit() {
   }
 }
 
-async function openTask(taskId: string) {
+async function openTask(taskId: string, remember = true) {
   currentTaskId.value = taskId;
+  if (remember) void rememberLocation();
   try {
     task.value = await api.getTask(taskId);
     const status = await api.sessionStatus(taskId);
@@ -336,10 +337,30 @@ function handleEvent(envelope: SessionEventEnvelope) {
   }
 }
 
+async function rememberLocation() {
+  try {
+    await api.setLastOpened(currentProjectId.value, currentTaskId.value);
+  } catch {
+    // Remembering the last location is a convenience; never surface failures.
+  }
+}
+
 watch(currentProjectId, async () => {
   await loadGit();
   await loadTasks();
 });
+
+async function restoreLocation() {
+  const projectId = settings.value.last_project_id ?? null;
+  if (projectId && projects.value.some((p) => p.id === projectId)) {
+    currentProjectId.value = projectId;
+    await loadTasks();
+    const taskId = settings.value.last_task_id ?? null;
+    if (taskId && tasks.value.some((t) => t.id === taskId)) {
+      await openTask(taskId, false);
+    }
+  }
+}
 
 onMounted(async () => {
   try {
@@ -352,6 +373,11 @@ onMounted(async () => {
   await loadAgents();
   await loadGit();
   await loadTasks();
+  await restoreLocation();
+  // Documentation helper: LJ_HUB_SCREENSHOT_OPEN=settings opens that view
+  // immediately so docs screenshots need no synthetic clicks.
+  if (info.value?.screenshot_open === "settings") showSettings.value = true;
+  if (info.value?.screenshot_open === "handoff") showHandoff.value = true;
   unlisten = await onSessionEvent(handleEvent);
   window
     .matchMedia?.("(prefers-color-scheme: dark)")
