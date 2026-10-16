@@ -51,7 +51,11 @@ async fn record_real_session_into_app_data() {
     let state = AppState::new(data_dir.clone());
     {
         let mut store = state.state.lock().unwrap();
-        if !store.projects.iter().any(|p| p.path == project_root.display().to_string()) {
+        if !store
+            .projects
+            .iter()
+            .any(|p| p.path == project_root.display().to_string())
+        {
             store.projects.push(Project {
                 id: "proj-lj-hub".into(),
                 name: "lj-hub".into(),
@@ -115,7 +119,10 @@ async fn record_real_session_into_app_data() {
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     let saved = handle.store.load_task("task-demo").unwrap();
     println!("已保存消息数：{}", saved.messages.len());
-    assert!(saved.messages.len() >= 2, "真实回合应记录用户消息与 Agent 回复");
+    assert!(
+        saved.messages.len() >= 2,
+        "真实回合应记录用户消息与 Agent 回复"
+    );
 }
 
 #[test]

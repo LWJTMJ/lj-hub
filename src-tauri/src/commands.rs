@@ -935,8 +935,10 @@ pub fn register_artifact(
     match task.handoff.as_mut() {
         Some(handoff) => handoff.artifacts.push(artifact.clone()),
         None => {
-            let mut draft = HandoffDraft::default();
-            draft.objective = task.title.clone();
+            let draft = HandoffDraft {
+                objective: task.title.clone(),
+                ..Default::default()
+            };
             let mut handoff = handoff::prepare(&task, &root, vec![artifact.clone()], draft);
             handoff.stage = crate::model::HandoffStage::Prepared;
             task.handoff = Some(handoff);
@@ -1046,7 +1048,7 @@ pub fn read_requirement_file(
         });
     }
     let content = std::fs::read_to_string(&path).map_err(|e| format!("读取失败：{e}"))?;
-    let (size, sha256) = artifacts::hash_file(&path).map_err(|e| e)?;
+    let (size, sha256) = artifacts::hash_file(&path)?;
     let modified = std::fs::metadata(&path)
         .ok()
         .and_then(|m| m.modified().ok())
