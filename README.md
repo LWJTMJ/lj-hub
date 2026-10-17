@@ -25,6 +25,35 @@
 - 权限请求：Agent 请求授权时界面阻塞等待，拒绝后不会继续执行（有自动化测试逐字校验）。
 - 本地优先持久化：会话与历史保存在本机 JSON 文件（原子写入），重开应用后可继续阅读。
 
+## 自动接力（多 Agent 协作）
+
+这是本项目的核心目标：**你只向一个 AI 交代任务，它调用其他已安装的 Agent 去做，
+彼此自动交接，不需要你在多个软件之间复制提示词。**
+
+在应用里打开左侧「🔗 协作接力」：
+
+1. 填任务目标，选规划 Agent → **生成计划**（规划 Agent 输出 JSON 计划，LJ Hub 严格校验：
+   未知 Agent、依赖环、重复 id、循环/重试上限）。
+2. **开始自动接力**。之后每一步都由调度器驱动，无需人工：
+   执行 Agent 干活 → 生成交接资料 → LJ Hub 按当前仓库自检（HEAD / 未提交 / **内容指纹**）
+   → 验收 Agent 独立验收 → 不通过就带着**具体的验收问题**自动返工 → 通过后进入下一步。
+3. 达到循环/重试上限、Agent 无法运行、工作区漂移时，运行会停成「需人工」并保留原始错误，
+   你在同一界面选择重试 / 标记完成 / 放弃。
+
+保证（都有自动化测试）：
+
+- **不需要人工复制**：步骤之间的上下文由 LJ Hub 组合成提示，含硬性用户要求（**永不截断**）
+  与上游产出的有界上下文（截断处有可见标记）。
+- **不互相覆盖**：全局一次只允许一个写入步骤；可选在独立 Git worktree + 独立分支中执行，
+  主工作区有未提交改动时拒绝创建隔离区。
+- **不误判完成**：中断的步骤不会被当成成功，也不会被盲目重跑，而是交人工确认。
+- **不伪造能力**：握手成功 ≠ 能跑真实回合。真实回合失败（例如缺 API key）的 Agent
+  会被标记并停止调度，界面显示供应商原文错误。
+
+真机实测：OpenCode 真实执行 + 真实独立验收通过，运行自动完成；
+DeepSeek Harness 验收入口因缺少 `DEEPSEEK_API_KEY` 停为「需人工」。
+细节与对照审计见 [`docs/RELAY_AUDIT_AND_DESIGN.md`](docs/RELAY_AUDIT_AND_DESIGN.md)。
+
 ## 它明确不做什么
 
 - 不伪装连接：命令存在 ≠ 可用。没有通过 ACP 握手的 Agent 一律标记 `NOT_TESTED`。
@@ -85,8 +114,8 @@ npm run tauri dev
 
 | Agent | 状态 | 实际证据 |
 |---|---|---|
-| **OpenCode** | `AVAILABLE` | `opencode acp` 握手成功（agentInfo `OpenCode 2.0.30`），并完成一轮真实模型回合 |
-| **DeepSeek Harness** | `AVAILABLE` | `dsh acp` 握手成功（`deepseek-harness-acp 0.0.1`）；真实模型回合未测试 |
+| **OpenCode** | `AVAILABLE` | `opencode acp` 握手成功（agentInfo `OpenCode 2.0.30`）；**真实模型回合已通过**，并作为执行方与验收方完成过一次真实自动接力 |
+| **DeepSeek Harness** | `AVAILABLE`（握手） | `dsh acp` 握手成功（`deepseek-harness-acp 0.0.1`）；**真实模型回合失败**：`no API key for provider route "deepseek-official"`。LJ Hub 据此把它标记为不可用于自动接力，直到提供 `DEEPSEEK_API_KEY`（可在 Agent 设置里填变量名，值只在启动时从环境读取，不落盘） |
 | **Codex** | `NOT_INSTALLED` | 本机无 `codex-acp`，也无 Codex CLI；接入走官方 `@agentclientprotocol/codex-acp`，需你在设置中显式启用（固定版本，非 latest） |
 | **WorkBuddy** | `CONFIG_REQUIRED` | 官方 Open API 适配器已实现并有协议测试（含 mock HTTP 服务），但需要开放平台审核通过的第三方应用 + OAuth 凭据 |
 | **Qoder（国际版）** | `NOT_INSTALLED` | 本机装有 Qoder.app，但 `qoder` CLI 不在 PATH，未安装则不做任何声明 |
