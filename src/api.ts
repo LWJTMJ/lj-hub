@@ -54,13 +54,17 @@ export const api = {
     executable: string | null,
     args: string[],
     allowNpmAdapter: boolean,
+    envPassthrough: string[] = [],
   ) =>
     invoke<void>("set_agent_override", {
       agentId,
       executable,
       args,
       allowNpmAdapter,
+      envPassthrough,
     }),
+  verifyAgentTurn: (agentId: string) =>
+    invoke<AgentReport>("verify_agent_turn", { agentId }),
   clearAgentOverride: (agentId: string) =>
     invoke<void>("clear_agent_override", { agentId }),
 

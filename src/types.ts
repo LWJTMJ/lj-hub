@@ -36,6 +36,7 @@ export interface AgentReport {
   auth_methods: string[];
   agent_info: string | null;
   capabilities: AgentCapabilitiesReport;
+  verification: AgentVerification;
   doc_url: string;
   notes: string;
   last_tested_at: string | null;
@@ -322,6 +323,16 @@ export interface AgentOverride {
   executable?: string | null;
   args: string[];
   allow_npm_adapter: boolean;
+  env_passthrough?: string[];
+}
+
+export interface AgentVerification {
+  executable_resolved: boolean;
+  handshake_ok: boolean;
+  real_turn_ok?: boolean | null;
+  real_turn_error?: string | null;
+  real_turn_at?: string | null;
+  schedulable: boolean;
 }
 
 // ---------------------------------------------------------------- relay runs

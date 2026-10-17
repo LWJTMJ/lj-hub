@@ -29,7 +29,9 @@ const editing = ref<string | null>(null);
 const execDraft = ref("");
 const argsDraft = ref("");
 const allowNpm = ref(false);
+const envDraft = ref("");
 const testing = ref<string | null>(null);
+const verifying = ref<string | null>(null);
 const reports = ref<AgentReport[]>(props.agents);
 const workbuddy = ref<WorkBuddyStatus | null>(null);
 const tokenDraft = ref("");
@@ -70,6 +72,7 @@ function beginEdit(agent: AgentReport) {
   execDraft.value = agent.executable ?? "";
   argsDraft.value = agent.acp_args.join(" ");
   allowNpm.value = props.settings.agent_overrides?.[agent.id]?.allow_npm_adapter ?? false;
+  envDraft.value = (props.settings.agent_overrides?.[agent.id]?.env_passthrough ?? []).join(" ");
   message.value = "";
   error.value = "";
 }
@@ -81,6 +84,7 @@ async function saveOverride(agentId: string) {
       execDraft.value.trim() === "" ? null : execDraft.value.trim(),
       argsDraft.value.split(/\s+/).filter((s) => s.length > 0),
       allowNpm.value,
+      envDraft.value.split(/\s+/).filter((s) => s.length > 0),
     );
     editing.value = null;
     await refresh();
@@ -102,6 +106,24 @@ async function clearOverride(agentId: string) {
 async function refresh() {
   reports.value = await api.detectAgents();
   emit("refresh");
+}
+
+/// Prove a real model turn. Spends the user's quota, so it is never automatic.
+async function runTurnVerification(agentId: string) {
+  verifying.value = agentId;
+  message.value = "";
+  error.value = "";
+  try {
+    const report = await api.verifyAgentTurn(agentId);
+    const index = reports.value.findIndex((a) => a.id === agentId);
+    if (index >= 0) reports.value.splice(index, 1, report);
+    message.value = `${report.display_name}: ${report.message}`;
+    emit("refresh");
+  } catch (e) {
+    error.value = errorText(e);
+  } finally {
+    verifying.value = null;
+  }
 }
 
 async function runTest(agentId: string) {
@@ -211,6 +233,24 @@ async function refreshWorkbuddy() {
               </div>
               <div v-if="agent.last_tested_at">tested: {{ agent.last_tested_at }}</div>
               <div>
+                验证：可执行 {{ agent.verification?.executable_resolved ? "✓" : "—" }} ·
+                握手 {{ agent.verification?.handshake_ok ? "✓" : "—" }} ·
+                真实回合
+                {{
+                  agent.verification?.real_turn_ok === true
+                    ? "✓"
+                    : agent.verification?.real_turn_ok === false
+                      ? "✗"
+                      : "未验证"
+                }} ·
+                <span :class="agent.verification?.schedulable ? 'badge ok' : 'badge warn'">
+                  {{ agent.verification?.schedulable ? "可用于自动接力" : "不可用于自动接力" }}
+                </span>
+              </div>
+              <div v-if="agent.verification?.real_turn_error" style="color: var(--danger)">
+                真实回合错误：{{ agent.verification.real_turn_error }}
+              </div>
+              <div>
                 能力：load_session={{ agent.capabilities.load_session }} ·
                 resume={{ agent.capabilities.resume_session }} ·
                 list={{ agent.capabilities.list_sessions }} ·
@@ -228,6 +268,12 @@ async function refreshWorkbuddy() {
               <label class="field">
                 <span>启动参数（空格分隔）</span>
                 <input v-model="argsDraft" placeholder="acp" />
+              </label>
+              <label class="field">
+                <span>
+                  透传环境变量名（空格分隔；只保存变量名，值仅在启动时从环境读取，不落盘不回显）
+                </span>
+                <input v-model="envDraft" placeholder="DEEPSEEK_API_KEY" />
               </label>
               <label class="checkline">
                 <input v-model="allowNpm" type="checkbox" />
@@ -251,6 +297,14 @@ async function refreshWorkbuddy() {
             >
               <span v-if="testing === agent.id" class="spinner" />
               {{ labels.testConnection }}
+            </button>
+            <button
+              :disabled="verifying === agent.id || agent.status === 'NOT_INSTALLED'"
+              :title="'会真实调用一次模型（消耗额度），通过后才允许参与自动接力'"
+              @click="runTurnVerification(agent.id)"
+            >
+              <span v-if="verifying === agent.id" class="spinner" />
+              验证真实回合
             </button>
             <button @click="beginEdit(agent)">配置</button>
             <a :href="agent.doc_url" target="_blank" style="font-size: 11.5px; color: var(--text-dim)">
