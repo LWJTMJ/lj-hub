@@ -21,9 +21,16 @@ pub mod events;
 pub mod git;
 pub mod handoff;
 pub mod model;
+pub mod run_driver;
+pub mod runs;
+pub mod scheduler;
+pub mod sessions;
 pub mod store;
-#[cfg(test)]
-mod test_support;
+pub mod worktree;
+
+/// Fixtures shared by unit and integration tests. Public so the integration
+/// tests in `tests/` can build real (disposable) Git repositories.
+pub mod test_support;
 pub mod workbuddy;
 
 pub use app::AppState;

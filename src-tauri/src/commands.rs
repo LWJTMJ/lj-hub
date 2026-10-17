@@ -22,6 +22,9 @@ pub struct LaunchSpec {
     pub args: Vec<String>,
     pub display: String,
     pub via_npm_adapter: bool,
+    /// Environment variables to pass through (names configured by the user,
+    /// values taken from LJ Hub's own environment at launch time only).
+    pub env: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -126,6 +129,10 @@ fn project_by_id(state: &AppState, project_id: &str) -> Result<Project, String> 
         .ok()
         .and_then(|s| s.projects.iter().find(|p| p.id == project_id).cloned())
         .ok_or_else(|| format!("未知项目：{project_id}"))
+}
+
+pub fn project_root_for(project: &Project) -> PathBuf {
+    project_root(project)
 }
 
 fn project_root(project: &Project) -> PathBuf {
@@ -299,6 +306,19 @@ pub async fn test_agent(app: AppHandle, agent_id: String) -> Result<AgentReport,
     report.auth_methods = outcome.auth_methods;
     report.capabilities = outcome.capabilities;
     report.last_tested_at = Some(now_iso());
+    report.verification.executable_resolved = report.executable.is_some();
+    report.verification.handshake_ok = matches!(
+        outcome.status,
+        crate::model::AgentStatus::Available | crate::model::AgentStatus::AuthRequired
+    );
+    // A handshake alone never makes an agent schedulable: a real model turn
+    // must have been proven (see `verify_agent_turn`).
+    report.verification.schedulable = report.verification.real_turn_ok == Some(true);
+    if matches!(outcome.status, crate::model::AgentStatus::Available) {
+        report.message.push_str(
+            "（握手成功；真实模型回合尚未验证，需在设置中执行“验证真实回合”后才能参与自动接力）",
+        );
+    }
     if spec.via_npm_adapter {
         report
             .message
@@ -311,6 +331,105 @@ pub async fn test_agent(app: AppHandle, agent_id: String) -> Result<AgentReport,
     Ok(report)
 }
 
+/// Prove that an agent can complete a **real model turn** (not just a
+/// handshake). Opt-in in the UI because it spends the user's quota; the result
+/// is what allows an agent to take part in the automatic relay.
+#[tauri::command]
+pub async fn verify_agent_turn(app: AppHandle, agent_id: String) -> Result<AgentReport, String> {
+    let state = app.state::<AppState>();
+    let workdir = state.data_dir.join("verify").join(&agent_id);
+    std::fs::create_dir_all(&workdir).map_err(|e| e.to_string())?;
+
+    let mut report = list_agents(app.clone())
+        .await?
+        .into_iter()
+        .find(|r| r.id == agent_id)
+        .ok_or_else(|| format!("未登记的 Agent：{agent_id}"))?;
+
+    let prompt = "Reply with exactly the two characters: OK";
+    let turn = crate::sessions::run_agent_turn(
+        &state,
+        None,
+        crate::sessions::TurnRequest {
+            project_id: project_for_verification(&state)?.as_str(),
+            agent_id: &agent_id,
+            workspace: &workdir,
+            title: &format!("{agent_id} · 真实回合验证"),
+            prompt,
+            timeout: std::time::Duration::from_secs(180),
+            run_id: None,
+            step_id: Some("verify-turn"),
+        },
+    )
+    .await;
+
+    report.verification.handshake_ok = matches!(
+        report.status,
+        crate::model::AgentStatus::Available | crate::model::AgentStatus::AuthRequired
+    );
+    report.verification.real_turn_at = Some(now_iso());
+    match turn {
+        Ok(result) if !result.text.trim().is_empty() => {
+            report.verification.real_turn_ok = Some(true);
+            report.verification.real_turn_error = None;
+            report.verification.schedulable = true;
+            report.message = format!(
+                "真实模型回合成功（{} 字），可用于自动接力。",
+                result.text.chars().count()
+            );
+        }
+        Ok(_) => {
+            report.verification.real_turn_ok = Some(false);
+            report.verification.real_turn_error = Some("回合结束但没有产生任何回答".to_string());
+            report.verification.schedulable = false;
+            report.message = "真实模型回合没有产生回答，不能参与自动接力。".to_string();
+        }
+        Err(error) => {
+            report.verification.real_turn_ok = Some(false);
+            report.verification.real_turn_error = Some(error.clone());
+            report.verification.schedulable = false;
+            report.message = format!("真实模型回合失败：{error}");
+        }
+    }
+    if let Ok(mut cache) = state.probe_results.lock() {
+        let mut merged = report.clone();
+        // Keep the handshake verdict; only the verification block changed.
+        if let Some(previous) = cache.get(&agent_id) {
+            merged.status = previous.status;
+            merged.auth_methods = previous.auth_methods.clone();
+            merged.capabilities = previous.capabilities.clone();
+            merged.agent_info = previous.agent_info.clone();
+        }
+        cache.insert(agent_id, merged.clone());
+        report = merged;
+    }
+    Ok(report)
+}
+
+/// The verification turn needs a project id; reuse any existing project, and
+/// create a throwaway one when the user has none yet.
+fn project_for_verification(state: &AppState) -> Result<String, String> {
+    let mut store = state.state.lock().map_err(|e| e.to_string())?;
+    if let Some(project) = store.projects.first() {
+        return Ok(project.id.clone());
+    }
+    let dir = state.data_dir.join("verify");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let project = Project {
+        id: crate::model::new_id("proj"),
+        name: "LJ Hub 验证目录".into(),
+        path: dir.display().to_string(),
+        git_root: None,
+        git_remote: None,
+        created_at: now_iso(),
+        last_opened_at: now_iso(),
+    };
+    let id = project.id.clone();
+    store.projects.push(project);
+    state.store.save_state(&store).map_err(|e| e.to_string())?;
+    Ok(id)
+}
+
 #[tauri::command]
 pub fn set_agent_override(
     state: State<'_, AppState>,
@@ -318,6 +437,7 @@ pub fn set_agent_override(
     executable: Option<String>,
     args: Option<Vec<String>>,
     allow_npm_adapter: Option<bool>,
+    env_passthrough: Option<Vec<String>>,
 ) -> Result<(), String> {
     if agents::find_definition(&agent_id).is_none() {
         return Err(format!("未登记的 Agent：{agent_id}"));
@@ -332,6 +452,18 @@ pub fn set_agent_override(
     entry.args = args.unwrap_or_default();
     if let Some(allow) = allow_npm_adapter {
         entry.allow_npm_adapter = allow;
+    }
+    if let Some(names) = env_passthrough {
+        // Store names only, and only sane ones.
+        entry.env_passthrough = names
+            .into_iter()
+            .map(|n| n.trim().to_string())
+            .filter(|n| {
+                !n.is_empty()
+                    && n.chars()
+                        .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+            })
+            .collect();
     }
     state.store.save_state(&store).map_err(|e| e.to_string())?;
     drop(store);
@@ -354,6 +486,286 @@ pub fn clear_agent_override(state: State<'_, AppState>, agent_id: String) -> Res
 }
 
 // --------------------------------------------------------------- workbuddy
+
+// ------------------------------------------------------------------- runs
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RunSummary {
+    pub id: String,
+    pub project_id: String,
+    pub title: String,
+    pub objective: String,
+    pub status: crate::scheduler::RunStatus,
+    pub steps_total: usize,
+    pub steps_done: usize,
+    pub steps_needs_human: usize,
+    pub stop_reason: Option<String>,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RunDetail {
+    pub run: crate::scheduler::Run,
+    pub log: Vec<String>,
+    /// The agent's own words for each step, so the UI can show what actually
+    /// happened without leaving LJ Hub.
+    pub step_tasks: Vec<StepTaskLink>,
+    pub blocked: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct StepTaskLink {
+    pub step_id: String,
+    pub task_id: String,
+    pub title: String,
+    pub agent: String,
+    pub status: String,
+}
+
+fn run_store(state: &AppState) -> crate::runs::RunStore {
+    crate::runs::RunStore::new(&state.data_dir)
+}
+
+fn summarize(run: &crate::scheduler::Run) -> RunSummary {
+    RunSummary {
+        id: run.id.clone(),
+        project_id: run.project_id.clone(),
+        title: run.title.clone(),
+        objective: run.objective.clone(),
+        status: run.status,
+        steps_total: run.steps.len(),
+        steps_done: run
+            .steps
+            .iter()
+            .filter(|s| s.status == crate::scheduler::StepStatus::Done)
+            .count(),
+        steps_needs_human: run
+            .steps
+            .iter()
+            .filter(|s| s.status == crate::scheduler::StepStatus::NeedsHuman)
+            .count(),
+        stop_reason: run.stop_reason.clone(),
+        updated_at: run.updated_at.clone(),
+    }
+}
+
+#[tauri::command]
+pub fn list_runs(state: State<'_, AppState>) -> Result<Vec<RunSummary>, String> {
+    let (runs, problems) = run_store(&state).list();
+    if !problems.is_empty() {
+        // Surface unreadable run files instead of hiding them.
+        return Err(format!(
+            "有 {} 个运行记录无法解析：{}",
+            problems.len(),
+            problems
+                .iter()
+                .map(|p| format!("{} ({})", p.run_id, p.detail))
+                .collect::<Vec<_>>()
+                .join("；")
+        ));
+    }
+    Ok(runs.iter().map(summarize).collect())
+}
+
+#[tauri::command]
+pub fn get_run(state: State<'_, AppState>, run_id: String) -> Result<RunDetail, String> {
+    let run = run_store(&state).load(&run_id)?;
+    let mut step_tasks = Vec::new();
+    for step in &run.steps {
+        let Some(task_id) = step.task_id.clone() else {
+            continue;
+        };
+        if let Some(task) = state.store.load_task(&task_id) {
+            step_tasks.push(StepTaskLink {
+                step_id: step.id.clone(),
+                task_id: task.id.clone(),
+                title: task.title.clone(),
+                agent: task.agent_id.clone(),
+                status: format!("{:?}", task.status),
+            });
+        }
+    }
+    let blocked = run
+        .steps
+        .iter()
+        .filter(|s| s.status == crate::scheduler::StepStatus::NeedsHuman)
+        .map(|s| {
+            format!(
+                "{}：{}",
+                s.id,
+                s.needs_human_reason
+                    .clone()
+                    .unwrap_or_else(|| "需要人工确认".into())
+            )
+        })
+        .collect();
+    Ok(RunDetail {
+        log: state.run_log(&run_id),
+        run,
+        step_tasks,
+        blocked,
+    })
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateRunInput {
+    pub project_id: String,
+    pub title: String,
+    pub objective: String,
+    /// Agent used for planning; also the default reviewer for steps that do not
+    /// override it.
+    pub agent: String,
+    /// Optional pre-made plan (JSON). When absent, `plan_run` asks the planner.
+    #[serde(default)]
+    pub plan_json: Option<String>,
+    #[serde(default)]
+    pub requirements: Vec<RequirementRef>,
+    #[serde(default)]
+    pub forbidden: Vec<String>,
+    /// Optional isolated worktree for every step of this run.
+    #[serde(default)]
+    pub use_worktree: bool,
+}
+
+#[tauri::command]
+pub fn create_run(
+    state: State<'_, AppState>,
+    input: CreateRunInput,
+) -> Result<crate::scheduler::Run, String> {
+    let project = project_by_id(&state, &input.project_id)?;
+    let root = project_root(&project);
+
+    let workspace = if input.use_worktree {
+        let repo = project
+            .git_root
+            .clone()
+            .ok_or_else(|| "该项目不是 Git 仓库，无法创建隔离工作区".to_string())?;
+        let worktree = crate::worktree::create_for_run(
+            std::path::Path::new(&repo),
+            &state.data_dir,
+            &input.title,
+        )?;
+        crate::scheduler::WorkspaceRef {
+            root: worktree.path.display().to_string(),
+            kind: "worktree".into(),
+            branch: Some(worktree.branch),
+        }
+    } else {
+        crate::scheduler::WorkspaceRef::main(root.display().to_string())
+    };
+
+    let plan = match input.plan_json.as_deref() {
+        Some(json) if !json.trim().is_empty() => {
+            let plan = crate::scheduler::parse_plan(json)
+                .map_err(|errors| format!("计划解析失败：{}", errors.join("；")))?;
+            let agents: Vec<String> = crate::agents::AGENTS
+                .iter()
+                .map(|d| d.id.to_string())
+                .collect();
+            let problems = crate::scheduler::validate_plan(&plan, &agents);
+            if !problems.is_empty() {
+                return Err(format!("计划未通过校验：{}", problems.join("；")));
+            }
+            plan
+        }
+        _ => crate::scheduler::RunPlan {
+            phases: Vec::new(),
+            steps: Vec::new(),
+        },
+    };
+
+    let mut run = crate::scheduler::Run::new(
+        crate::model::new_id("run"),
+        project.id.clone(),
+        input.title.clone(),
+        input.objective.clone(),
+        input.agent.clone(),
+        plan,
+        workspace,
+    );
+    run.requirements = input.requirements;
+    run.forbidden = input.forbidden;
+
+    let store = run_store(&state);
+    store.save(&run)?;
+    state.record_run_log(&run.id, "运行已创建（草稿）");
+    Ok(run)
+}
+
+#[tauri::command]
+pub async fn plan_run(app: AppHandle, run_id: String) -> Result<crate::scheduler::Run, String> {
+    let result = {
+        let state = app.state::<AppState>();
+        crate::run_driver::plan_run(&state, &run_id).await
+    };
+    let state = app.state::<AppState>();
+    let _ = state.emit_run_event(&run_id, "计划已更新");
+    result
+}
+
+#[tauri::command]
+pub fn start_run(app: AppHandle, run_id: String) -> Result<crate::scheduler::Run, String> {
+    let state = app.state::<AppState>();
+    let mut run = run_store(&state).load(&run_id)?;
+    if run.plan.steps.is_empty() {
+        return Err("该运行还没有计划，请先生成计划".to_string());
+    }
+    let problems = crate::scheduler::validate_plan(&run.plan, &[]);
+    if !problems.is_empty() {
+        return Err(format!("计划未通过校验：{}", problems.join("；")));
+    }
+    run.status = crate::scheduler::RunStatus::Running;
+    run.stop_reason = None;
+    run_store(&state).save(&run)?;
+    state.record_run_log(&run_id, "开始自动推进");
+    {
+        let mut workers = state.run_workers.lock().map_err(|e| e.to_string())?;
+        workers.insert(run_id.clone());
+    }
+    crate::run_driver::start_worker(app.clone(), run_id.clone(), Default::default());
+    Ok(run)
+}
+
+#[tauri::command]
+pub fn pause_run(app: AppHandle, run_id: String) -> Result<crate::scheduler::Run, String> {
+    let state = app.state::<AppState>();
+    {
+        let mut workers = state.run_workers.lock().map_err(|e| e.to_string())?;
+        workers.remove(&run_id);
+    }
+    state.record_run_log(&run_id, "已暂停自动推进（进行中的 agent 回合不会被强杀）");
+    let _ = state.emit_run_event(&run_id, "已暂停");
+    run_store(&state).load(&run_id)
+}
+
+#[tauri::command]
+pub fn cancel_run(app: AppHandle, run_id: String) -> Result<crate::scheduler::Run, String> {
+    let state = app.state::<AppState>();
+    crate::run_driver::cancel_run(&state, &run_id)
+}
+
+#[tauri::command]
+pub fn resolve_run_step(
+    app: AppHandle,
+    run_id: String,
+    step_id: String,
+    action: String,
+    note: String,
+) -> Result<crate::scheduler::Run, String> {
+    let state = app.state::<AppState>();
+    let run = crate::run_driver::resolve_needs_human(&state, &run_id, &step_id, &action, &note)?;
+    Ok(run)
+}
+
+#[tauri::command]
+pub fn delete_run(state: State<'_, AppState>, run_id: String) -> Result<(), String> {
+    run_store(&state).delete(&run_id)
+}
+
+#[tauri::command]
+pub fn runs_needing_human(state: State<'_, AppState>) -> Vec<(String, String, String)> {
+    run_store(&state).needs_human()
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct WorkBuddyStatus {
@@ -532,6 +944,8 @@ pub fn create_task(
         messages: Vec::new(),
         handoff: None,
         last_git: Some(crate::git::evidence(&project_root(&project))),
+        run_id: None,
+        run_step_id: None,
     };
     state.store.save_task(&task).map_err(|e| e.to_string())?;
     state.refresh_index();

@@ -96,8 +96,13 @@ pub const AGENTS: &[AgentDefinition] = &[
         display_name: "Qoder (国际版)",
         vendor: "Alibaba",
         transport: TransportKind::AcpStdio,
-        path_names: &["qoder"],
+        // `qodercli` is the name used by another open-source ACP client
+        // (FreeBuddy) and `qoder` is the name in Qoder's own documentation;
+        // both are accepted, and the real handshake decides what works.
+        path_names: &["qodercli", "qoder"],
         candidates: &[
+            "~/.local/bin/qodercli",
+            "/opt/homebrew/bin/qodercli",
             "~/.local/bin/qoder",
             "/opt/homebrew/bin/qoder",
             "/Applications/Qoder.app/Contents/Resources/bin/qoder",
@@ -108,7 +113,8 @@ pub const AGENTS: &[AgentDefinition] = &[
         npm_adapter: None,
         doc_url: "https://qoder.com/",
         notes: "International Qoder CLI. Uses the CLI and login state already present on this \
-                machine; LJ Hub never reinstalls or replaces the vendor CLI.",
+                machine; LJ Hub never reinstalls or replaces the vendor CLI. \
+                The executable name is verified by the startup handshake, not assumed.",
         compatibility_only: false,
     },
     AgentDefinition {
@@ -323,6 +329,7 @@ pub fn base_report(def: &AgentDefinition) -> AgentReport {
         auth_methods: Vec::new(),
         agent_info: None,
         capabilities: AgentCapabilitiesReport::default(),
+        verification: crate::model::AgentVerification::default(),
         doc_url: def.doc_url.to_string(),
         notes: def.notes.to_string(),
         last_tested_at: None,
@@ -352,6 +359,7 @@ pub fn local_report(def: &'static AgentDefinition, over: Option<&AgentOverride>)
         Some((path, overridden)) => {
             report.executable = Some(path.display().to_string());
             report.overridden = overridden;
+            report.verification.executable_resolved = true;
             report.status = AgentStatus::NotTested;
             report.message = if def.compatibility_only {
                 "已找到可执行文件；这是一个兼容入口，尚未通过 ACP 握手验证。".to_string()
@@ -447,6 +455,7 @@ mod tests {
             executable: Some("/definitely/not/here/opencode".into()),
             args: vec![],
             allow_npm_adapter: false,
+            env_passthrough: vec![],
         };
         let report = local_report(def, Some(&over));
         assert_eq!(report.status, AgentStatus::Error);

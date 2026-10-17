@@ -19,6 +19,7 @@ import type {
 import Sidebar from "./components/Sidebar.vue";
 import ChatView from "./components/ChatView.vue";
 import RightPanel from "./components/RightPanel.vue";
+import RunsDialog from "./components/RunsDialog.vue";
 import SettingsDialog from "./components/SettingsDialog.vue";
 import HandoffDialog from "./components/HandoffDialog.vue";
 import Toasts from "./components/Toasts.vue";
@@ -37,6 +38,8 @@ const busy = ref(false);
 const toast = ref<string | null>(null);
 const showSettings = ref(false);
 const showHandoff = ref(false);
+const showRuns = ref(false);
+const runsBadge = ref(0);
 const paneCollapsed = ref(false);
 const toasts = ref<{ id: number; text: string; kind: "info" | "error" }[]>([]);
 
@@ -337,6 +340,19 @@ function handleEvent(envelope: SessionEventEnvelope) {
   }
 }
 
+/// Surface runs that stopped for a human, without opening anything.
+async function refreshRunsBadge() {
+  try {
+    const blocked = await api.runsNeedingHuman();
+    runsBadge.value = blocked.length;
+    if (blocked.length > 0) {
+      notify(`有 ${blocked.length} 个接力运行需要你确认`, "error");
+    }
+  } catch {
+    // A missing badge must never break the window.
+  }
+}
+
 async function rememberLocation() {
   try {
     await api.setLastOpened(currentProjectId.value, currentTaskId.value);
@@ -374,6 +390,7 @@ onMounted(async () => {
   await loadGit();
   await loadTasks();
   await restoreLocation();
+  await refreshRunsBadge();
   // Documentation helper: LJ_HUB_SCREENSHOT_OPEN=settings opens that view
   // immediately so docs screenshots need no synthetic clicks.
   if (info.value?.screenshot_open === "settings") showSettings.value = true;
@@ -407,6 +424,12 @@ onUnmounted(() => {
       @create-task="createTask"
       @delete-task="deleteTask"
       @open-settings="showSettings = true"
+      @open-runs="
+        async () => {
+          showRuns = true;
+        }
+      "
+      :runs-badge="runsBadge"
     />
 
     <ChatView
@@ -447,6 +470,20 @@ onUnmounted(() => {
     @refresh="loadAgents"
     @theme="setTheme"
     @locale="setLocale"
+  />
+
+  <RunsDialog
+    v-if="showRuns"
+    :project-id="currentProjectId"
+    :agents="agents"
+    :labels="T"
+    @close="
+      async () => {
+        showRuns = false;
+        await loadTasks();
+      }
+    "
+    @open-task="openTask"
   />
 
   <HandoffDialog

@@ -13,6 +13,8 @@
 //!   slow         stay busy until cancelled
 //!   crash        exit immediately (spawn/handshake failure)
 //!   fs           exercise fs/read_text_file and fs/write_text_file
+//!   relay        act as planner / worker / reviewer for the relay tests, based
+//!                on the ROLE marker in the prompt, and work in the session cwd
 //!
 //! Every inbound request/notification is appended to the file given by
 //! `--log <path>`, which lets tests assert exactly what the agent saw.
@@ -31,6 +33,7 @@ enum Scenario {
     Slow,
     Crash,
     Fs,
+    Relay,
 }
 
 fn parse_scenario() -> (Scenario, Option<PathBuf>, Option<String>) {
@@ -51,6 +54,7 @@ fn parse_scenario() -> (Scenario, Option<PathBuf>, Option<String>) {
                         "slow" => Scenario::Slow,
                         "crash" => Scenario::Crash,
                         "fs" => Scenario::Fs,
+                        "relay" => Scenario::Relay,
                         other => {
                             eprintln!("unknown scenario {other}");
                             Scenario::Happy
@@ -83,6 +87,9 @@ fn main() {
     let mut out = std::io::stdout();
     let mut session_id = resume_id.unwrap_or_else(|| "mock-session-1".to_string());
     let mut log_lines: Vec<Value> = Vec::new();
+    // Working directory announced by session/new; the relay scenarios write
+    // their evidence here, exactly like a real agent would.
+    let mut cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
 
     // Read one message per call. A held `StdinLock` would deadlock the nested
     // reads used by the permission/fs scenarios.
@@ -128,6 +135,9 @@ fn main() {
             }
             "authenticate" => reply(&mut out, id, json!({})),
             "session/new" => {
+                if let Some(dir) = msg.pointer("/params/cwd").and_then(|v| v.as_str()) {
+                    cwd = PathBuf::from(dir);
+                }
                 session_id = format!("mock-session-{}", log_lines.len());
                 reply(
                     &mut out,
@@ -147,6 +157,57 @@ fn main() {
             }
             "session/prompt" => {
                 let prompt_text = extract_prompt_text(&msg);
+
+                if scenario == Scenario::Relay {
+                    // Answer strictly according to the role marker LJ Hub puts
+                    // in the prompt, so the test exercises the real scheduler
+                    // and not the mock's imagination.
+                    let answer = if prompt_text.contains("ROLE: PLANNER") {
+                        relay_plan_json()
+                    } else if prompt_text.contains("ROLE: REVIEWER") {
+                        // Fail once (while the marker file exists), then pass.
+                        let marker = cwd.join("relay-fail-once.marker");
+                        if marker.exists() {
+                            let _ = std::fs::remove_file(&marker);
+                            "验收发现 1 个问题：\n- 交付物缺少必要的测试记录\nREVIEW_STATUS: FAIL\nUNRESOLVED: 1".to_string()
+                        } else {
+                            "核对完成：HEAD、改动清单与登记产物一致。\nREVIEW_STATUS: PASS"
+                                .to_string()
+                        }
+                    } else if prompt_text.contains("工作模式：read") {
+                        // Read-only step: a well-behaved agent must not modify
+                        // the workspace here, and the mock behaves like one.
+                        format!(
+                            "只读分析完成（cwd={}）。\nSTEP_SUMMARY: 只读步骤未修改任何文件",
+                            cwd.display()
+                        )
+                    } else {
+                        // Write step: leave real evidence in the working directory.
+                        let out_file = cwd.join("worker-output.txt");
+                        let previous = std::fs::read_to_string(&out_file).unwrap_or_default();
+                        let line = format!("attempt {}\n", previous.lines().count() + 1);
+                        let _ = std::fs::write(&out_file, format!("{previous}{line}"));
+                        format!(
+                            "已在 {} 写入证据。\nSTEP_SUMMARY: 完成 (cwd={})",
+                            out_file.display(),
+                            cwd.display()
+                        )
+                    };
+                    notify(
+                        &mut out,
+                        json!({
+                            "sessionId": session_id,
+                            "update": { "sessionUpdate": "agent_message_chunk",
+                                        "content": { "type": "text", "text": answer } }
+                        }),
+                    );
+                    reply(&mut out, id, json!({ "stopReason": "end_turn" }));
+                    if let Some(path) = &log_path {
+                        let _ =
+                            std::fs::write(path, serde_json::to_vec_pretty(&log_lines).unwrap());
+                    }
+                    continue;
+                }
                 notify(
                     &mut out,
                     json!({
@@ -326,6 +387,34 @@ fn main() {
             let _ = std::fs::write(path, serde_json::to_vec_pretty(&log_lines).unwrap());
         }
     }
+}
+
+/// A minimal but valid plan: one write step reviewed by `codex`, then a read
+/// step that depends on it.
+fn relay_plan_json() -> String {
+    json!({
+        "phases": [
+            { "id": "p1", "title": "实现", "parallelism": 1, "gate": "all_done" },
+            { "id": "p2", "title": "汇总", "parallelism": 1, "gate": "all_done" }
+        ],
+        "steps": [
+            {
+                "id": "s1", "phase": "p1", "title": "实现功能",
+                "prompt": "在项目里实现功能并留下证据文件",
+                "agent": "opencode", "mode": "write",
+                "depends_on": [], "verify_by": "codex",
+                "max_loops": 3, "max_attempts": 2, "consumes": []
+            },
+            {
+                "id": "s2", "phase": "p2", "title": "汇总结果",
+                "prompt": "阅读上游结果并总结",
+                "agent": "opencode", "mode": "read",
+                "depends_on": ["s1"], "verify_by": null,
+                "max_loops": 1, "max_attempts": 1, "consumes": ["s1"]
+            }
+        ]
+    })
+    .to_string()
 }
 
 fn extract_prompt_text(msg: &Value) -> String {

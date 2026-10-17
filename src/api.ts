@@ -6,6 +6,10 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import type {
   AcceptResult,
+  CreateRunInput,
+  RelayRun,
+  RunDetail,
+  RunSummary,
   AgentReport,
   AppInfo,
   ArtifactRef,
@@ -138,6 +142,25 @@ export const api = {
   importRequirements: (taskId: string, relativePath: string) =>
     invoke<RequirementRef[]>("import_requirements", { taskId, relativePath }),
 
+  // relay runs
+  listRuns: () => invoke<RunSummary[]>("list_runs"),
+  getRun: (runId: string) => invoke<RunDetail>("get_run", { runId }),
+  createRun: (input: CreateRunInput) =>
+    invoke<RelayRun>("create_run", { input }),
+  planRun: (runId: string) => invoke<RelayRun>("plan_run", { runId }),
+  startRun: (runId: string) => invoke<RelayRun>("start_run", { runId }),
+  pauseRun: (runId: string) => invoke<RelayRun>("pause_run", { runId }),
+  cancelRun: (runId: string) => invoke<RelayRun>("cancel_run", { runId }),
+  resolveRunStep: (
+    runId: string,
+    stepId: string,
+    action: "retry" | "mark_done" | "cancel",
+    note: string,
+  ) => invoke<RelayRun>("resolve_run_step", { runId, stepId, action, note }),
+  deleteRun: (runId: string) => invoke<void>("delete_run", { runId }),
+  runsNeedingHuman: () =>
+    invoke<[string, string, string][]>("runs_needing_human"),
+
   // settings
   getSettings: () => invoke<Settings>("get_settings"),
   setLastOpened: (projectId: string | null, taskId: string | null) =>
@@ -150,6 +173,14 @@ export async function pickDirectory(): Promise<string | null> {
   const result = await open({ directory: true, multiple: false });
   if (typeof result === "string") return result;
   return null;
+}
+
+export function onRunEvent(
+  handler: (payload: { run_id: string; message: string }) => void,
+): Promise<UnlistenFn> {
+  return listen<{ run_id: string; message: string }>("lj://run-event", (event) =>
+    handler(event.payload),
+  );
 }
 
 export function onSessionEvent(

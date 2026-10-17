@@ -67,9 +67,30 @@ pub struct AgentReport {
     pub agent_info: Option<String>,
     /// Feature flags confirmed by a real handshake.
     pub capabilities: AgentCapabilitiesReport,
+    #[serde(default)]
+    pub verification: AgentVerification,
     pub doc_url: String,
     pub notes: String,
     pub last_tested_at: Option<String>,
+}
+
+/// How far an agent has actually been verified on this machine.
+///
+/// These levels are separate on purpose: a successful ACP handshake says
+/// nothing about whether a real model turn can run, and a real turn says
+/// nothing about whether the agent can take part in automated scheduling.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AgentVerification {
+    /// An executable was resolved.
+    pub executable_resolved: bool,
+    /// A real ACP `initialize` succeeded.
+    pub handshake_ok: bool,
+    /// A real model turn completed (opt-in: costs quota).
+    pub real_turn_ok: Option<bool>,
+    pub real_turn_error: Option<String>,
+    pub real_turn_at: Option<String>,
+    /// The agent may be used by the automatic relay.
+    pub schedulable: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -92,6 +113,12 @@ pub struct AgentOverride {
     /// default: LJ Hub never runs an unpinned `npx latest`.
     #[serde(default)]
     pub allow_npm_adapter: bool,
+    /// Environment variable **names** to pass through from LJ Hub's own
+    /// environment to this agent's process (for example `DEEPSEEK_API_KEY`
+    /// when a vendor CLI needs it). Only names are stored here — values are
+    /// never persisted, logged or sent to the UI.
+    #[serde(default)]
+    pub env_passthrough: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -170,6 +197,15 @@ pub struct GitEvidence {
     pub dirty: bool,
     pub dirty_files: Vec<String>,
     pub captured_at: String,
+    /// SHA-256 over the *content* of the changed/untracked files (plus HEAD and
+    /// branch). Comparing filenames is not enough: a file can change without
+    /// its name changing, so drift would go unnoticed. Only the dirty set is
+    /// hashed, so a large clean repository costs nothing.
+    #[serde(default)]
+    pub content_fingerprint: Option<String>,
+    /// How much was actually hashed, so the coverage of the check is visible.
+    #[serde(default)]
+    pub fingerprint_detail: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -305,6 +341,11 @@ pub struct Task {
     pub messages: Vec<Message>,
     pub handoff: Option<Handoff>,
     pub last_git: Option<GitEvidence>,
+    /// Set when this task was created by the relay driver for a run step.
+    #[serde(default)]
+    pub run_id: Option<String>,
+    #[serde(default)]
+    pub run_step_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

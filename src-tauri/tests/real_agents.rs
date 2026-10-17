@@ -82,6 +82,8 @@ async fn record_real_session_into_app_data() {
         messages: Vec::new(),
         handoff: None,
         last_git: Some(lj_hub_lib::git::evidence(&project_root)),
+        run_id: None,
+        run_step_id: None,
     };
     state.store.save_task(&task).unwrap();
     state.refresh_index();

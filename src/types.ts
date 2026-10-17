@@ -324,6 +324,145 @@ export interface AgentOverride {
   allow_npm_adapter: boolean;
 }
 
+// ---------------------------------------------------------------- relay runs
+
+export type RunStatus =
+  | "DRAFT"
+  | "RUNNING"
+  | "PARTIAL"
+  | "DONE"
+  | "FAILED"
+  | "CANCELLED"
+  | "NEEDS_HUMAN";
+
+export type RelayStepStatus =
+  | "PENDING"
+  | "RUNNING"
+  | "AWAITING_HANDOFF"
+  | "VERIFYING"
+  | "DONE"
+  | "FAILED"
+  | "CANCELLED"
+  | "NEEDS_HUMAN";
+
+export type StepMode = "read" | "write";
+
+export interface RelayPhase {
+  id: string;
+  title: string;
+  parallelism: number;
+  gate: "all_done" | "review_required" | "manual_approval";
+}
+
+export interface RelayStepSpec {
+  id: string;
+  phase: string;
+  title: string;
+  prompt: string;
+  agent: string;
+  mode: StepMode;
+  depends_on: string[];
+  verify_by?: string | null;
+  max_loops: number;
+  max_attempts: number;
+  timeout_secs: number;
+  consumes: string[];
+}
+
+export interface RelayPlan {
+  phases: RelayPhase[];
+  steps: RelayStepSpec[];
+}
+
+export interface RelayWorkspace {
+  root: string;
+  kind: string;
+  branch?: string | null;
+}
+
+export interface RelayStepState {
+  id: string;
+  status: RelayStepStatus;
+  attempts: number;
+  loops: number;
+  task_id?: string | null;
+  summary?: string | null;
+  review_status?: "PASS" | "FAIL" | null;
+  unresolved?: number | null;
+  findings: string[];
+  started_at?: string | null;
+  finished_at?: string | null;
+  git?: GitEvidence | null;
+  handoff_id?: string | null;
+  workspace: RelayWorkspace;
+  failure_reason?: string | null;
+  needs_human_reason?: string | null;
+}
+
+export interface RelayRun {
+  id: string;
+  project_id: string;
+  title: string;
+  objective: string;
+  agent: string;
+  plan: RelayPlan;
+  workspace: RelayWorkspace;
+  steps: RelayStepState[];
+  status: RunStatus;
+  policy: { max_step_executions: number; auto_rework: boolean };
+  requirements: RequirementRef[];
+  forbidden: string[];
+  history: {
+    at: string;
+    step_id: string;
+    from: RelayStepStatus;
+    to: RelayStepStatus;
+    detail: string;
+  }[];
+  created_at: string;
+  updated_at: string;
+  stop_reason?: string | null;
+}
+
+export interface RunSummary {
+  id: string;
+  project_id: string;
+  title: string;
+  objective: string;
+  status: RunStatus;
+  steps_total: number;
+  steps_done: number;
+  steps_needs_human: number;
+  stop_reason?: string | null;
+  updated_at: string;
+}
+
+export interface StepTaskLink {
+  step_id: string;
+  task_id: string;
+  title: string;
+  agent: string;
+  status: string;
+}
+
+export interface RunDetail {
+  run: RelayRun;
+  log: string[];
+  step_tasks: StepTaskLink[];
+  blocked: string[];
+}
+
+export interface CreateRunInput {
+  project_id: string;
+  title: string;
+  objective: string;
+  agent: string;
+  plan_json?: string | null;
+  requirements: RequirementRef[];
+  forbidden: string[];
+  use_worktree: boolean;
+}
+
 export interface HandoffDraftInput {
   to_agent: string | null;
   objective: string;

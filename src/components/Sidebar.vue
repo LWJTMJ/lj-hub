@@ -18,6 +18,7 @@ interface Labels {
 }
 
 const props = defineProps<{
+  runsBadge: number;
   info: AppInfo | null;
   projects: Project[];
   tasks: TaskSummary[];
@@ -36,6 +37,7 @@ const emit = defineEmits<{
   (e: "create-task", agentId: string): void;
   (e: "delete-task", taskId: string): void;
   (e: "open-settings"): void;
+  (e: "open-runs"): void;
 }>();
 
 function agentName(agentId: string): string {
@@ -138,6 +140,12 @@ function timeLabel(iso: string): string {
     </div>
 
     <div style="padding: 8px; border-top: 1px solid var(--border)">
+      <button class="ghost" style="width: 100%; text-align: left" @click="emit('open-runs')">
+        🔗 协作接力
+        <span v-if="runsBadge" class="badge danger" style="margin-left: 6px">
+          {{ runsBadge }} 需人工
+        </span>
+      </button>
       <button class="ghost" style="width: 100%; text-align: left" @click="emit('open-settings')">
         ⚙ {{ labels.settings }}
       </button>

@@ -17,32 +17,40 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 pub struct AppState {
-    pub store: Store,
+    /// Shared so a `'static` event recorder can be handed to agent sessions
+    /// without keeping a reference to the whole application state.
+    pub store: Arc<Store>,
+    pub state: Arc<Mutex<StoreState>>,
+    pub open_streams: Arc<Mutex<HashMap<String, String>>>,
+    pub app: Arc<Mutex<Option<tauri::AppHandle>>>,
     pub data_dir: PathBuf,
-    pub state: Mutex<StoreState>,
     pub sessions: Mutex<HashMap<String, Arc<LiveSession>>>,
     pub permissions: PermissionRegistry,
     /// Cached results of real ACP handshakes, keyed by agent id.
     pub probe_results: Mutex<HashMap<String, AgentReport>>,
-    pub app: Mutex<Option<tauri::AppHandle>>,
-    /// Message id currently being appended to for each (task, stream) pair.
-    open_streams: Mutex<HashMap<String, String>>,
+    /// Run ids that currently have a driver worker alive.
+    pub run_workers: Mutex<std::collections::HashSet<String>>,
+    /// Recent driver activity per run, so the UI can show what happened even
+    /// when the transcript lives in another agent's session.
+    pub run_logs: Mutex<HashMap<String, Vec<String>>>,
 }
 
 impl AppState {
     pub fn new(data_dir: PathBuf) -> Self {
-        let store = Store::new(&data_dir);
+        let store = Arc::new(Store::new(&data_dir));
         let mut state = store.load_state();
         store.rebuild_index(&mut state, &[]);
         Self {
             store,
             data_dir,
-            state: Mutex::new(state),
+            state: Arc::new(Mutex::new(state)),
+            open_streams: Arc::new(Mutex::new(HashMap::new())),
+            app: Arc::new(Mutex::new(None)),
             sessions: Mutex::new(HashMap::new()),
             permissions: PermissionRegistry::default(),
             probe_results: Mutex::new(HashMap::new()),
-            app: Mutex::new(None),
-            open_streams: Mutex::new(HashMap::new()),
+            run_workers: Mutex::new(std::collections::HashSet::new()),
+            run_logs: Mutex::new(HashMap::new()),
         }
     }
 
@@ -52,13 +60,69 @@ impl AppState {
         }
     }
 
-    fn emit_to_ui(&self, envelope: &EventEnvelope) {
+    /// Append a line to a run's activity log (bounded, newest last).
+    pub fn record_run_log(&self, run_id: &str, message: &str) {
+        if let Ok(mut logs) = self.run_logs.lock() {
+            let entry = logs.entry(run_id.to_string()).or_default();
+            entry.push(format!("{} {}", now_iso(), message));
+            let len = entry.len();
+            if len > 500 {
+                entry.drain(0..len - 500);
+            }
+        }
+    }
+
+    pub fn run_log(&self, run_id: &str) -> Vec<String> {
+        self.run_logs
+            .lock()
+            .ok()
+            .and_then(|logs| logs.get(run_id).cloned())
+            .unwrap_or_default()
+    }
+
+    /// Notify the UI that something about a run changed.
+    pub fn emit_run_event(&self, run_id: &str, message: &str) -> Result<(), String> {
         if let Ok(guard) = self.app.lock() {
             if let Some(app) = guard.as_ref() {
                 use tauri::Emitter;
-                let _ = app.emit("lj://session-event", envelope);
+                app.emit(
+                    "lj://run-event",
+                    serde_json::json!({ "run_id": run_id, "message": message }),
+                )
+                .map_err(|e| e.to_string())?;
             }
         }
+        Ok(())
+    }
+
+    /// On start-up, reconcile every stored run so a crash cannot leave a step
+    /// looking like it is still executing, and surface what needs a human.
+    pub fn reconcile_runs(&self) -> Vec<String> {
+        let store = crate::runs::RunStore::new(&self.data_dir);
+        let (runs, problems) = store.list();
+        let mut notes: Vec<String> = problems
+            .iter()
+            .map(|p| format!("运行记录 {} 无法解析：{}", p.run_id, p.detail))
+            .collect();
+        for mut run in runs {
+            if matches!(run.status, crate::scheduler::RunStatus::Running) {
+                let before = run.status;
+                let step_notes = crate::runs::RunStore::reconcile_after_restart(&mut run);
+                if !step_notes.is_empty() {
+                    if let Err(e) = store.save(&run) {
+                        notes.push(format!("运行 {} 保存失败：{e}", run.id));
+                    } else {
+                        notes.push(format!(
+                            "运行「{}」上次处于 {:?}，已按中断处理（需人工确认 {} 个步骤）",
+                            run.title,
+                            before,
+                            step_notes.len()
+                        ));
+                    }
+                }
+            }
+        }
+        notes
     }
 
     pub fn refresh_index(&self) {
@@ -83,20 +147,20 @@ impl AppState {
         }
     }
 
+    /// A `'static` handle that can persist session events. Handed to agent
+    /// session callbacks so they never borrow the application state.
+    pub fn recorder(&self) -> EventRecorder {
+        EventRecorder {
+            store: self.store.clone(),
+            state: self.state.clone(),
+            open_streams: self.open_streams.clone(),
+            app: self.app.clone(),
+        }
+    }
+
     /// Persist an event as session history and notify the UI.
     pub fn record_event(&self, task_id: &str, event: SessionEvent) {
-        if let Some(mut task) = self.store.load_task(task_id) {
-            if let Ok(mut streams) = self.open_streams.lock() {
-                apply_event(&mut task, &event, &mut streams);
-            }
-            task.updated_at = now_iso();
-            let _ = self.store.save_task(&task);
-            self.refresh_index();
-        }
-        self.emit_to_ui(&EventEnvelope {
-            task_id: task_id.to_string(),
-            event,
-        });
+        self.recorder().record_event(task_id, event);
     }
 
     pub fn is_live(&self, task_id: &str) -> bool {
@@ -158,6 +222,20 @@ impl AppState {
             }
         }
 
+        let env: Vec<(String, String)> = over
+            .as_ref()
+            .map(|o| {
+                o.env_passthrough
+                    .iter()
+                    .filter_map(|name| {
+                        // Only names are configured by the user; the value comes
+                        // from LJ Hub's own environment and is never stored.
+                        std::env::var(name).ok().map(|value| (name.clone(), value))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
         if let Some((path, overridden)) = agents::resolve_executable(def, over.as_ref()) {
             return Ok(crate::commands::LaunchSpec {
                 executable: path.display().to_string(),
@@ -168,6 +246,7 @@ impl AppState {
                     path.display().to_string()
                 },
                 via_npm_adapter: false,
+                env,
             });
         }
 
@@ -181,6 +260,7 @@ impl AppState {
                         args: vec!["-y".to_string(), spec.to_string()],
                         display: format!("npx -y {spec}"),
                         via_npm_adapter: true,
+                        env,
                     });
                 }
             }
@@ -192,6 +272,62 @@ impl AppState {
             ),
             None => format!("未找到 {agent_id} 的可执行文件，请先安装官方 CLI。"),
         })
+    }
+}
+
+/// Persists session events and notifies the UI. Holds only shared handles, so
+/// it is `Send + Sync + 'static` and can be owned by an agent session thread.
+#[derive(Clone)]
+pub struct EventRecorder {
+    store: Arc<Store>,
+    state: Arc<Mutex<StoreState>>,
+    open_streams: Arc<Mutex<HashMap<String, String>>>,
+    app: Arc<Mutex<Option<tauri::AppHandle>>>,
+}
+
+impl EventRecorder {
+    pub fn record_event(&self, task_id: &str, event: SessionEvent) {
+        if let Some(mut task) = self.store.load_task(task_id) {
+            if let Ok(mut streams) = self.open_streams.lock() {
+                apply_event(&mut task, &event, &mut streams);
+            }
+            task.updated_at = now_iso();
+            let _ = self.store.save_task(&task);
+            self.refresh_index();
+        }
+        if let Ok(guard) = self.app.lock() {
+            if let Some(app) = guard.as_ref() {
+                use tauri::Emitter;
+                let _ = app.emit(
+                    "lj://session-event",
+                    EventEnvelope {
+                        task_id: task_id.to_string(),
+                        event,
+                    },
+                );
+            }
+        }
+    }
+
+    pub fn emit_run_event(&self, run_id: &str, message: &str) -> Result<(), String> {
+        if let Ok(guard) = self.app.lock() {
+            if let Some(app) = guard.as_ref() {
+                use tauri::Emitter;
+                app.emit(
+                    "lj://run-event",
+                    serde_json::json!({ "run_id": run_id, "message": message }),
+                )
+                .map_err(|e| e.to_string())?;
+            }
+        }
+        Ok(())
+    }
+
+    fn refresh_index(&self) {
+        if let Ok(mut state) = self.state.lock() {
+            self.store.rebuild_index(&mut state, &[]);
+            let _ = self.store.save_state(&state);
+        }
     }
 }
 
@@ -389,7 +525,7 @@ pub fn build_spec(
         project_root,
         executable: PathBuf::from(&spec.executable),
         args: spec.args.clone(),
-        extra_env: Vec::new(),
+        extra_env: spec.env.clone(),
         // Only pass the native id when LJ Hub actually recorded one; the agent
         // decides whether it can honour it.
         resume_native: task.native_session_id.clone(),
@@ -434,6 +570,12 @@ pub fn run() {
             let state = AppState::new(data_dir);
             state.set_app(app.handle().clone());
             state.refresh_index();
+            // A crash or a quit during a run must never look like success:
+            // reconcile persisted runs before the UI can read them.
+            for note in state.reconcile_runs() {
+                tracing::warn!("{note}");
+                state.record_run_log("startup", &note);
+            }
             app.manage(state);
 
             // Documentation helper: `LJ_HUB_SCREENSHOT_MODE=topmost` raises the
@@ -467,6 +609,7 @@ pub fn run() {
             crate::commands::detect_agents,
             crate::commands::test_agent,
             crate::commands::set_agent_override,
+            crate::commands::verify_agent_turn,
             crate::commands::clear_agent_override,
             crate::commands::workbuddy_status,
             crate::commands::workbuddy_status_detail,
@@ -492,6 +635,16 @@ pub fn run() {
             crate::commands::verify_artifact,
             crate::commands::remove_artifact,
             crate::commands::read_requirement_file,
+            crate::commands::list_runs,
+            crate::commands::get_run,
+            crate::commands::create_run,
+            crate::commands::plan_run,
+            crate::commands::start_run,
+            crate::commands::pause_run,
+            crate::commands::cancel_run,
+            crate::commands::resolve_run_step,
+            crate::commands::delete_run,
+            crate::commands::runs_needing_human,
             crate::commands::get_settings,
             crate::commands::set_last_opened,
             crate::commands::set_theme,
@@ -521,6 +674,8 @@ mod tests {
             messages: Vec::new(),
             handoff: None,
             last_git: None,
+            run_id: None,
+            run_step_id: None,
         }
     }
 

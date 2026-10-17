@@ -110,6 +110,37 @@ pub fn verify(handoff: &Handoff, project_root: &Path) -> Vec<HandoffVerification
         },
     });
 
+    // 3b. Content drift: the file *list* can stay identical while a file's
+    // bytes move on, so compare a content fingerprint of the changed set.
+    let current_fingerprint = crate::git::fingerprint_of(project_root);
+    let recorded_fingerprint = handoff.git_evidence.content_fingerprint.clone();
+    let fingerprint_check = match (&recorded_fingerprint, &current_fingerprint) {
+        (Some(recorded), Some((current, detail))) => HandoffVerificationCheck {
+            name: "工作区内容指纹".to_string(),
+            passed: recorded == current,
+            detail: if recorded == current {
+                format!("改动内容与交接记录一致（{detail}）")
+            } else {
+                format!(
+                    "内容已变化：文件列表可能相同但字节不同（{detail}）。交接时 {}，现在 {}",
+                    &recorded[..recorded.len().min(12)],
+                    &current[..current.len().min(12)]
+                )
+            },
+        },
+        (None, Some((_, detail))) => HandoffVerificationCheck {
+            name: "工作区内容指纹".to_string(),
+            passed: true,
+            detail: format!("交接记录未包含指纹（旧记录），本次已补算：{detail}"),
+        },
+        _ => HandoffVerificationCheck {
+            name: "工作区内容指纹".to_string(),
+            passed: false,
+            detail: "当前目录不是 Git 仓库，无法校验内容指纹".to_string(),
+        },
+    };
+    checks.push(fingerprint_check);
+
     // 4. Registered artifacts must still be there and unchanged.
     let mut missing = Vec::new();
     let mut changed = Vec::new();
@@ -358,6 +389,8 @@ mod tests {
             }],
             handoff: None,
             last_git: Some(crate::git::evidence(root)),
+            run_id: None,
+            run_step_id: None,
         }
     }
 
@@ -436,6 +469,28 @@ mod tests {
         let checks = task.handoff.as_ref().unwrap().checks.clone();
         let artifact_check = checks.iter().find(|c| c.name == "必要文件").unwrap();
         assert!(!artifact_check.passed);
+    }
+
+    #[test]
+    fn content_drift_with_identical_file_names_is_refused() {
+        let repo = fixture_repo();
+        let store = Store::new(repo.path().join(".lj-hub-test"));
+        let mut task = task_for(repo.path());
+        std::fs::write(repo.path().join("work.txt"), "v1").unwrap();
+        let handoff = prepare(&task, repo.path(), vec![], draft());
+        task.handoff = Some(handoff);
+
+        // Same file name, same dirty-file list, different bytes.
+        std::fs::write(repo.path().join("work.txt"), "v2 changed").unwrap();
+
+        let outcome = accept(&store, &mut task, repo.path(), "codex", "", false).unwrap();
+        assert!(!outcome.accepted, "文件名不变但内容变化必须导致拒绝接手");
+        let checks = task.handoff.as_ref().unwrap().checks.clone();
+        let fingerprint = checks
+            .iter()
+            .find(|c| c.name == "工作区内容指纹")
+            .expect("必须包含内容指纹检查");
+        assert!(!fingerprint.passed, "{}", fingerprint.detail);
     }
 
     #[test]

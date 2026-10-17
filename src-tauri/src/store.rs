@@ -166,6 +166,8 @@ mod tests {
             }],
             handoff: None,
             last_git: None,
+            run_id: None,
+            run_step_id: None,
         }
     }
 

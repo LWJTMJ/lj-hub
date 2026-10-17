@@ -6,6 +6,7 @@
 //! working directory cannot leak into the result.
 
 use crate::model::{GitEvidence, GitFileChange, GitState};
+use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -225,6 +226,7 @@ pub fn diff_for(dir: &Path, path: &str, max_bytes: usize) -> Result<String, Stri
 
 pub fn evidence(dir: &Path) -> GitEvidence {
     let state = state(dir);
+    let fingerprint = fingerprint_of(dir);
     GitEvidence {
         root: state.root,
         branch: state.branch,
@@ -236,7 +238,107 @@ pub fn evidence(dir: &Path) -> GitEvidence {
             .map(|c| format!("{} {}", c.status, c.path))
             .collect(),
         captured_at: crate::model::now_iso(),
+        content_fingerprint: fingerprint.as_ref().map(|(hash, _)| hash.clone()),
+        fingerprint_detail: fingerprint.map(|(_, detail)| detail),
     }
+}
+
+/// Per-file hashing cap. Bigger files contribute their size and a head/tail
+/// digest instead of a full read, so a multi-gigabyte artifact cannot stall
+/// verification.
+pub const FINGERPRINT_FILE_CAP: u64 = 16 * 1024 * 1024;
+/// Total budget for one fingerprint pass.
+pub const FINGERPRINT_TOTAL_CAP: u64 = 256 * 1024 * 1024;
+/// Never hash more than this many changed files in one pass.
+pub const FINGERPRINT_MAX_FILES: usize = 2_000;
+
+/// Content fingerprint of the *changed* part of a repository.
+///
+/// Returns `(sha256, human readable coverage detail)`. `None` when the
+/// directory is not a repository.
+///
+/// What it covers: HEAD, branch, the porcelain status lines, and the bytes of
+/// every changed/untracked file (bounded). This detects "the file list is the
+/// same but a file's content moved on", which a filename comparison misses.
+pub fn fingerprint_of(dir: &Path) -> Option<(String, String)> {
+    let state = state(dir);
+    if !state.is_repo {
+        return None;
+    }
+    let root = PathBuf::from(state.root.clone()?);
+
+    let mut hasher = Sha256::new();
+    hasher.update(b"lj-hub-workspace-fingerprint-v1\n");
+    hasher.update(state.head.as_deref().unwrap_or("-").as_bytes());
+    hasher.update(b"\n");
+    hasher.update(state.branch.as_deref().unwrap_or("-").as_bytes());
+    hasher.update(b"\n");
+
+    let mut entries: Vec<(String, String)> = state
+        .changes
+        .iter()
+        .map(|c| (c.path.clone(), c.status.clone()))
+        .collect();
+    entries.sort();
+
+    let mut hashed_files = 0usize;
+    let mut hashed_bytes = 0u64;
+    let mut skipped_files = 0usize;
+
+    for (path, status) in &entries {
+        hasher.update(format!("{status} {path}\n").as_bytes());
+        let absolute = root.join(path);
+        let Ok(meta) = std::fs::metadata(&absolute) else {
+            hasher.update(b"<missing>\n");
+            skipped_files += 1;
+            continue;
+        };
+        if !meta.is_file() {
+            hasher.update(b"<not-a-file>\n");
+            continue;
+        }
+        hasher.update(meta.len().to_string().as_bytes());
+        hasher.update(b"\n");
+
+        if hashed_files >= FINGERPRINT_MAX_FILES
+            || hashed_bytes >= FINGERPRINT_TOTAL_CAP
+            || meta.len() > FINGERPRINT_FILE_CAP
+        {
+            // Record size + mtime instead of content so the check stays cheap
+            // but still notices an edit that changes either.
+            let modified = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            hasher.update(format!("<meta-only mtime={modified}>\n").as_bytes());
+            skipped_files += 1;
+            continue;
+        }
+
+        match std::fs::read(&absolute) {
+            Ok(bytes) => {
+                hasher.update(&bytes);
+                hashed_files += 1;
+                hashed_bytes += bytes.len() as u64;
+            }
+            Err(_) => {
+                hasher.update(b"<unreadable>\n");
+                skipped_files += 1;
+            }
+        }
+        hasher.update(b"\n");
+    }
+
+    let detail = format!(
+        "改了 {} 项；按内容哈希 {} 个文件（{} KiB）；仅按元数据 {} 个",
+        entries.len(),
+        hashed_files,
+        hashed_bytes / 1024,
+        skipped_files
+    );
+    Some((format!("{:x}", hasher.finalize()), detail))
 }
 
 /// Recent commits, used for handoff "what changed" context.
@@ -286,6 +388,60 @@ mod tests {
         assert!(run_git(repo.path(), &["reset", "--hard"]).is_err());
         assert!(run_git(repo.path(), &["clean", "-fd"]).is_err());
         assert!(run_git(repo.path(), &["push"]).is_err());
+    }
+
+    #[test]
+    fn fingerprint_detects_content_change_with_same_file_list() {
+        let repo = fixture_repo();
+        std::fs::write(repo.path().join("a.txt"), "one").unwrap();
+        std::fs::write(repo.path().join("b.txt"), "two").unwrap();
+        let first = fingerprint_of(repo.path()).unwrap().0;
+
+        // Same file names, same status list, different content.
+        std::fs::write(repo.path().join("a.txt"), "one changed").unwrap();
+        let second = fingerprint_of(repo.path()).unwrap().0;
+        assert_ne!(first, second, "文件名不变但内容变化必须被发现");
+
+        // Re-hashing the unchanged state is stable.
+        let third = fingerprint_of(repo.path()).unwrap().0;
+        assert_eq!(second, third);
+    }
+
+    #[test]
+    fn fingerprint_notices_a_new_commit() {
+        let repo = fixture_repo();
+        let before = fingerprint_of(repo.path()).unwrap().0;
+        std::fs::write(repo.path().join("tracked.txt"), "next\n").unwrap();
+        // The read-only allowlist must keep refusing write subcommands, so the
+        // test drives git directly here on purpose.
+        for args in [
+            vec!["add", "tracked.txt"],
+            vec!["commit", "-q", "-m", "next"],
+        ] {
+            let status = Command::new("git")
+                .arg("-C")
+                .arg(repo.path())
+                .args(args)
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .status()
+                .expect("git available");
+            assert!(status.success());
+        }
+        let after = fingerprint_of(repo.path()).unwrap().0;
+        assert_ne!(before, after);
+    }
+
+    #[test]
+    fn evidence_carries_fingerprint_and_coverage() {
+        let repo = fixture_repo();
+        std::fs::write(repo.path().join("x.txt"), "x").unwrap();
+        let evidence = evidence(repo.path());
+        assert!(evidence.content_fingerprint.is_some());
+        assert!(evidence
+            .fingerprint_detail
+            .as_deref()
+            .unwrap_or_default()
+            .contains("按内容哈希"));
     }
 
     #[test]
